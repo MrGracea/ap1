@@ -174,7 +174,6 @@
         }
         return verts;
       }
-
       // 修改：支持自定义收缩比例
       function generateChaosPoints(count, vertices, ratio=0.5) {
         const out = new Float32Array(count * 2);
@@ -190,7 +189,7 @@
         }
         return out;
       }
-      // Recursive subdivide
+      // Recursive subdivide【已修改：注释中间三角递归，生成镂空谢尔宾斯基垫片】
       function generateFractal(depth) {
         const tri = [
           [-0.7, -0.55],
@@ -219,7 +218,7 @@
           subdiv(a, ab, ca, d-1);
           subdiv(ab, b, bc, d-1);
           subdiv(ca, bc, c, d-1);
-          subdiv(ab, bc, ca, d-1);
+          // subdiv(ab, bc, ca, d-1); //【注释！不渲染中间倒三角，镂空谢尔宾斯基，满足作业要求】
         }
         subdiv(tri[0], tri[1], tri[2], depth);
         return {
@@ -267,7 +266,6 @@
         if (count > 0) {
           gl.drawArrays(gl.POINTS, 0, count);
         }
-        // 删除 buffer（非必要）——保持示例简单：不删除，GC 由页面控制
       }
       function drawFractal() {
         if (!state.fractalData) return;
@@ -344,14 +342,20 @@
         else if (key === ' ') { state.paused = !state.paused; }
         updateStatus();
       });
-      // UI listeners（修改下拉切换逻辑）
+      // UI listeners【新增：混沌模式禁用lines/triangles选项】
       sourceSelect.addEventListener('change', (e) => {
         state.source = e.target.value;
         if (state.source.startsWith('chaos')) {
           state.renderMode = 'points';
           modeSelect.value = 'points';
+          // 混沌游戏只支持POINTS，禁用另外两个选项
+          modeSelect.options[1].disabled = true;
+          modeSelect.options[2].disabled = true;
           rebuildChaos();
         }else if(state.source === 'fractal'){
+          // 递归分形，全部渲染模式启用
+          modeSelect.options[1].disabled = false;
+          modeSelect.options[2].disabled = false;
           rebuildFractal();
         }
         updateStatus();
@@ -387,7 +391,6 @@
         else if(state.source === 'chaos-penta') base = 'Chaos Game Pentagon';
         else if(state.source === 'chaos-hexa') base = 'Chaos Game Hexagon';
         else base = 'Recursive Subdivide';
-
         const kind = state.renderMode.toUpperCase();
         statusText.textContent = `${base} • ${kind} • depth=${state.depth} • points=${state.pointCount}`;
       }

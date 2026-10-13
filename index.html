@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>AP1 - Interactive 2D Fractal (教材 Common/initShaders.js 风格)</title>
+  <style>
+    html,body{height:100%;margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,"Helvetica Neue",Arial}
+    body{background:linear-gradient(180deg,#071122,#07111a);color:#e6eef8}
+    canvas{display:block;width:100vw;height:100vh;background:transparent;cursor:grab}
+    canvas.dragging{cursor:grabbing}
+    .ui{position:fixed;left:16px;top:16px;background:rgba(10,18,28,0.72);padding:12px;border-radius:10px;border:1px solid rgba(255,255,255,0.05);width:320px}
+    label{display:block;font-size:12px;color:#bcd3ee;margin-bottom:6px}
+    select,input[type=range],button{width:100%;margin-bottom:8px}
+    .status{font-size:12px;color:#9fbbe3;margin-top:6px}
+    .small{font-size:11px;color:#86a9d0}
+  </style>
+</head>
+<body>
+  <canvas id="gl-canvas"></canvas>
+  <div class="ui">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <strong>AP1 Fractal </strong>
+      <span class="small">use initShaders.js</span>
+    </div>
+    <label>算法 (Algorithm)
+      <select id="sourceSelect">
+        <option value="chaos">Chaos Game (Triangle 三角形)</option>
+        <option value="chaos-penta">Chaos Game (Pentagon 五边形)</option>
+        <option value="chaos-hexa">Chaos Game (Hexagon 六边形)</option>
+        <option value="fractal">Recursive Subdivide</option>
+      </select>
+    </label>
+    <label>渲染模式 (Render Mode)
+      <select id="modeSelect">
+        <option value="points">POINTS</option>
+        <option value="lines">LINES</option>
+        <option value="triangles">TRIANGLES</option>
+      </select>
+    </label>
+    <label>递归深度 (Depth)
+      <input id="depthRange" type="range" min="0" max="6" step="1" value="4" />
+    </label>
+    <label>点数 (Point Count, for Chaos)
+      <input id="countRange" type="range" min="1000" max="100000" step="1000" value="5000" />
+    </label>
+    <label>点大小 (Point Size)
+      <input id="sizeRange" type="range" min="1" max="18" step="1" value="3" />
+    </label>
+    <label>配色 (Palette)
+      <select id="paletteSelect">
+        <option value="0">橙色</option>
+        <option value="1">蓝色</option>
+        <option value="2">紫色</option>
+      </select>
+    </label>
+    <button id="generateBtn">Regenerate</button>
+    <div class="status">
+      <div>键盘: 1/2/3 切模式，Space 暂停/继续生长</div>
+      <div>鼠标: 拖拽平移，滚轮缩放</div>
+      <div id="statusText" class="small">Ready</div>
+    </div>
+  </div>
+  <!-- 顶点着色器 (放在 DOM 中，供 initShaders 读取) -->
+  <script id="vshader" type="x-shader/x-vertex">
+    attribute vec2 a_Position;
+    uniform vec2 u_Pan;
+    uniform float u_Zoom;
+    uniform float u_PointSize;
+    void main() {
+      vec2 p = (a_Position + u_Pan) * u_Zoom;
+      gl_Position = vec4(p, 0.0, 1.0);
+      gl_PointSize = u_PointSize;
+    }
+  </script>
+  <!-- 片元着色器 -->
+  <script id="fshader" type="x-shader/x-fragment">
+    precision mediump float;
+    uniform vec3 u_Color;
+    void main() {
+      gl_FragColor = vec4(u_Color, 1.0);
+    }
+  </script>
+  <!-- 引入教材库 initShaders.js，和html同目录 -->
+  <script src="initShaders.js"></script>
+  <script>
+    // 以下为主程序（依赖 initShaders.js）
+    (function () {
+      const canvas = document.getElementById('gl-canvas');
+      // 尝试 WebGL 上下文（教材风格通常用 webgl 而非 webgl2，这样与 initShaders 通常配合）
+      const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+      if (!gl) {
+        alert('WebGL not available');
+        return;
+      }
+      // UI 元素
+      const sourceSelect = document.getElementById('sourceSelect');
+      const modeSelect = document.getElementById('modeSelect');
+      const depthRange = document.getElementById('depthRange');
+      const countRange = document.getElementById('countRange');
+      const sizeRange = document.getElementById('sizeRange');
+      const paletteSelect = document.getElementById('paletteSelect');
+      const generateBtn = document.getElementById('generateBtn');
+      const statusText = document.getElementById('statusText');
+      const palettes = [
+        [1.0, 0.45, 0.25],   // Sunset
+        [0.45, 0.75, 1.0],   // Ocean
+        [0.85, 0.42, 1.0]    // Neon
+      ];
+      const state = {
+        source: 'chaos',
+        renderMode: 'points',
+        depth: 4,
+        pointCount: 5000,
+        pointSize: 3,
+        paletteIndex: 0,
+        paused: false,
+        currentChaosCount: 0,
+        animationStep: 120,
+        zoom: 1.0,
+        panX: 0.0,
+        panY: 0.0,
+        dragging: false,
+        lastMouse: { x: 0, y: 0 },
+        chaosData: null,
+        fractalData: null,
+        chaosRatio: 0.5 // 新增：混沌游戏收缩比例，n边形专用
+      };
+      // 初始化 program（使用 initShaders）
+      const program = initShaders(gl, 'vshader', 'fshader');
+      if (program === -1) {
+        alert('Shader init failed');
+        return;
+      }
+      gl.useProgram(program);
+      // attribute/uniform 位置（教材里常用命名 a_Position 等）
+      const a_Position = gl.getAttribLocation(program, 'a_Position');
+      const u_Pan = gl.getUniformLocation(program, 'u_Pan');
+      const u_Zoom = gl.getUniformLocation(program, 'u_Zoom');
+      const u_PointSize = gl.getUniformLocation(program, 'u_PointSize');
+      const u_Color = gl.getUniformLocation(program, 'u_Color');
+      // 缓冲（会在每次渲染前绑定）
+      function createArrayBuffer(data) {
+        const buffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+        gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+        gl.enableVertexAttribArray(a_Position);
+        gl.vertexAttribPointer(a_Position, 2, gl.FLOAT, false, 0, 0);
+        return buffer;
+      }
+      // 视口尺寸处理
+      function resizeCanvas() {
+        const dpr = window.devicePixelRatio || 1;
+        const w = Math.floor(window.innerWidth * dpr);
+        const h = Math.floor(window.innerHeight * dpr);
+        if (canvas.width !== w || canvas.height !== h) {
+          canvas.width = w;
+          canvas.height = h;
+          canvas.style.width = window.innerWidth + 'px';
+          canvas.style.height = window.innerHeight + 'px';
+          gl.viewport(0, 0, w, h);
+        }
+      }
+      window.addEventListener('resize', resizeCanvas);
+      // ---------- 生成算法 ----------
+      function randBetween(min, max) { return min + Math.random() * (max - min); }
+      function midpoint(a, b) { return [(a[0]+b[0]) * 0.5, (a[1]+b[1]) * 0.5]; }
+      // 新增：生成正n边形顶点
+      function createNGonVertices(n, radius=0.8){
+        const verts = [];
+        for(let i=0;i<n;i++){
+          const angle = 2 * Math.PI * i / n - Math.PI/2;
+          verts.push([radius * Math.cos(angle), radius * Math.sin(angle)]);
+        }
+        return verts;
+      }
+      // 修改：支持自定义收缩比例
+      function generateChaosPoints(count, vertices, ratio=0.5) {
+        const out = new Float32Array(count * 2);
+        let p = [randBetween(-1, 1), randBetween(-1, 1)];
+        for (let i = 0; i < count; i++) {
+          const v = vertices[Math.floor(Math.random() * vertices.length)];
+          p = [
+            p[0] * (1-ratio) + v[0] * ratio,
+            p[1] * (1-ratio) + v[1] * ratio
+          ];
+          out[2*i] = p[0];
+          out[2*i+1] = p[1];
+        }
+        return out;
+      }
+      // Recursive subdivide【已修改：注释中间三角递归，生成镂空谢尔宾斯基垫片】
+      function generateFractal(depth) {
+        const tri = [
+          [-0.7, -0.55],
+          [0.7, -0.55],
+          [0.0, 0.85]
+        ];
+        const data = { points: [], lines: [], triangles: [] };
+        function emitBase(a,b,c) {
+          // points (3 verts)
+          data.points.push(a[0], a[1], b[0], b[1], c[0], c[1]);
+          // lines (3 edges as pairs)
+          data.lines.push(a[0], a[1], b[0], b[1]);
+          data.lines.push(b[0], b[1], c[0], c[1]);
+          data.lines.push(c[0], c[1], a[0], a[1]);
+          // triangles (3 verts)
+          data.triangles.push(a[0], a[1], b[0], b[1], c[0], c[1]);
+        }
+        function subdiv(a,b,c,d) {
+          if (d === 0) {
+            emitBase(a,b,c);
+            return;
+          }
+          const ab = midpoint(a,b);
+          const bc = midpoint(b,c);
+          const ca = midpoint(c,a);
+          subdiv(a, ab, ca, d-1);
+          subdiv(ab, b, bc, d-1);
+          subdiv(ca, bc, c, d-1);
+          // subdiv(ab, bc, ca, d-1); //【注释！不渲染中间倒三角，镂空谢尔宾斯基，满足作业要求】
+        }
+        subdiv(tri[0], tri[1], tri[2], depth);
+        return {
+          points: new Float32Array(data.points),
+          lines: new Float32Array(data.lines),
+          triangles: new Float32Array(data.triangles)
+        };
+      }
+      // rebuild data（修改，适配n边形）
+      function rebuildChaos() {
+        let vertices;
+        if(state.source === "chaos-penta"){
+          vertices = createNGonVertices(5);
+          state.chaosRatio = 0.618; //五边形黄金分割比例
+        }else if(state.source === "chaos-hexa"){
+          vertices = createNGonVertices(6);
+          state.chaosRatio = 0.667;
+        }else{
+          // 默认三角形
+          vertices = [ [-0.8, -0.7],[0.8, -0.7],[0.0, 0.85] ];
+          state.chaosRatio = 0.5;
+        }
+        state.chaosData = generateChaosPoints(state.pointCount, vertices, state.chaosRatio);
+        state.currentChaosCount = 0;
+      }
+      function rebuildFractal() {
+        state.fractalData = generateFractal(state.depth);
+      }
+      // initial build
+      function regenerateAll() {
+        rebuildChaos();
+        rebuildFractal();
+        updateStatus();
+      }
+      // ---------- 绘制 ----------
+      function clear() {
+        gl.clearColor(0.06, 0.09, 0.12, 1.0);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+      }
+      function drawChaos() {
+        if (!state.chaosData) return;
+        // 每次创建 buffer 并 draw 前设置 attribute pointer（简单易懂）
+        const buf = createArrayBuffer(state.chaosData);
+        const count = Math.min(state.currentChaosCount, state.pointCount);
+        if (count > 0) {
+          gl.drawArrays(gl.POINTS, 0, count);
+        }
+      }
+      function drawFractal() {
+        if (!state.fractalData) return;
+        let data;
+        let mode;
+        if (state.renderMode === 'points') {
+          data = state.fractalData.points;
+          mode = gl.POINTS;
+        } else if (state.renderMode === 'lines') {
+          data = state.fractalData.lines;
+          mode = gl.LINES;
+        } else {
+          data = state.fractalData.triangles;
+          mode = gl.TRIANGLES;
+        }
+        if (!data || data.length === 0) return;
+        createArrayBuffer(data);
+        gl.drawArrays(mode, 0, data.length / 2);
+      }
+      function renderLoop() {
+        resizeCanvas();
+        if (!state.paused && state.source.startsWith('chaos')) {
+          state.currentChaosCount = Math.min(state.pointCount, state.currentChaosCount + state.animationStep);
+        }
+        clear();
+        // set common uniforms
+        gl.uniform2f(u_Pan, state.panX, state.panY);
+        gl.uniform1f(u_Zoom, state.zoom);
+        gl.uniform1f(u_PointSize, state.pointSize);
+        const c = palettes[state.paletteIndex];
+        gl.uniform3f(u_Color, c[0], c[1], c[2]);
+        if (state.source.startsWith('chaos')) {
+          drawChaos();
+        } else {
+          drawFractal();
+        }
+        requestAnimationFrame(renderLoop);
+      }
+      // ---------- 输入与交互 ----------
+      // Mouse pan
+      canvas.addEventListener('mousedown', (e) => {
+        state.dragging = true;
+        canvas.classList.add('dragging');
+        state.lastMouse.x = e.clientX;
+        state.lastMouse.y = e.clientY;
+      });
+      window.addEventListener('mouseup', () => {
+        state.dragging = false;
+        canvas.classList.remove('dragging');
+      });
+      window.addEventListener('mousemove', (e) => {
+        if (!state.dragging) return;
+        const dx = e.clientX - state.lastMouse.x;
+        const dy = e.clientY - state.lastMouse.y;
+        // 映射平移量到视口坐标（经验值）
+        state.panX += dx * 0.002 / state.zoom;
+        state.panY -= dy * 0.002 / state.zoom;
+        state.lastMouse.x = e.clientX;
+        state.lastMouse.y = e.clientY;
+      });
+      // Wheel zoom
+      canvas.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        const factor = Math.exp(-e.deltaY * 0.0012);
+        state.zoom *= factor;
+        state.zoom = Math.max(0.2, Math.min(8.0, state.zoom));
+      }, { passive: false });
+      // Keyboard
+      window.addEventListener('keydown', (e) => {
+        const key = e.key.toLowerCase();
+        if (key === '1') { state.renderMode = 'points'; modeSelect.value = 'points'; }
+        else if (key === '2') { state.renderMode = 'lines'; modeSelect.value = 'lines'; }
+        else if (key === '3') { state.renderMode = 'triangles'; modeSelect.value = 'triangles'; }
+        else if (key === ' ') { state.paused = !state.paused; }
+        updateStatus();
+      });
+      // UI listeners【新增：混沌模式禁用lines/triangles选项】
+      sourceSelect.addEventListener('change', (e) => {
+        state.source = e.target.value;
+        if (state.source.startsWith('chaos')) {
+          state.renderMode = 'points';
+          modeSelect.value = 'points';
+          // 混沌游戏只支持POINTS，禁用另外两个选项
+          modeSelect.options[1].disabled = true;
+          modeSelect.options[2].disabled = true;
+          rebuildChaos();
+        }else if(state.source === 'fractal'){
+          // 递归分形，全部渲染模式启用
+          modeSelect.options[1].disabled = false;
+          modeSelect.options[2].disabled = false;
+          rebuildFractal();
+        }
+        updateStatus();
+      });
+      modeSelect.addEventListener('change', (e) => {
+        state.renderMode = e.target.value;
+        updateStatus();
+      });
+      depthRange.addEventListener('input', (e) => {
+        state.depth = Number(e.target.value);
+        rebuildFractal();
+        updateStatus();
+      });
+      countRange.addEventListener('input', (e) => {
+        state.pointCount = Number(e.target.value);
+        rebuildChaos();
+        updateStatus();
+      });
+      sizeRange.addEventListener('input', (e) => {
+        state.pointSize = Number(e.target.value);
+        updateStatus();
+      });
+      paletteSelect.addEventListener('change', (e) => {
+        state.paletteIndex = Number(e.target.value);
+        updateStatus();
+      });
+      generateBtn.addEventListener('click', () => {
+        regenerateAll();
+      });
+      function updateStatus() {
+        let base;
+        if(state.source === 'chaos') base = 'Chaos Game Triangle';
+        else if(state.source === 'chaos-penta') base = 'Chaos Game Pentagon';
+        else if(state.source === 'chaos-hexa') base = 'Chaos Game Hexagon';
+        else base = 'Recursive Subdivide';
+        const kind = state.renderMode.toUpperCase();
+        statusText.textContent = `${base} • ${kind} • depth=${state.depth} • points=${state.pointCount}`;
+      }
+      // ---------- 初始化 ----------
+      function init() {
+        resizeCanvas();
+        // default UI sync
+        sourceSelect.value = state.source;
+        modeSelect.value = state.renderMode;
+        depthRange.value = String(state.depth);
+        countRange.value = String(state.pointCount);
+        sizeRange.value = String(state.pointSize);
+        paletteSelect.value = String(state.paletteIndex);
+        regenerateAll();
+        updateStatus();
+        requestAnimationFrame(renderLoop);
+      }
+      init();
+    })();
+  </script>
+</body>
+</html>
